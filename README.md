@@ -14,7 +14,7 @@ Generate candidate addresses with a short prefix:
 mkp224o -d onions alice
 ```
 
-Filter them for readable patterns (where prefix.txt contains just `alice` and words.txt is a large wordlist like [dwyl/english-words](https://github.com/dwyl/english-words)):
+Filter them for readable patterns (where prefix.txt contains just `alice` and words_alpha.txt is a large wordlist like [dwyl/english-words](https://github.com/dwyl/english-words)):
 
 ``` bash
 ls onions | ./onion-match prefix.txt words_alpha.txt
