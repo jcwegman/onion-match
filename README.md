@@ -14,10 +14,10 @@ Generate candidate addresses with a short prefix:
 mkp224o -d onions alice
 ```
 
-Filter them for readable patterns (where prefix.txt contains just `alice`):
+Filter them for readable patterns (where prefix.txt contains just `alice` and words.txt is a large wordlist like [dwyl/english-words](https://github.com/dwyl/english-words)):
 
 ``` bash
-ls onions | ./onion-match prefix.txt words.txt
+ls onions | ./onion-match prefix.txt words_alpha.txt
 ```
 
 Example matches:
@@ -49,7 +49,7 @@ g++ -std=c++17 -O2 onion-match.cpp -o onion-match
 Basic filtering:
 
 ``` bash
-ls onions | ./onion-match prefix.txt words.txt
+ls onions | ./onion-match prefix.txt words_alpha.txt
 # alicetechxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
 # alicecheesexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
 # alicelolxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
@@ -59,7 +59,7 @@ ls onions | ./onion-match prefix.txt words.txt
 Control segment length:
 
 ``` bash
-ls onions | ./onion-match prefix.txt words.txt --range=5-7
+ls onions | ./onion-match prefix.txt words_alpha.txt --range=5-7
 # alicecheesexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
 # alicegainsxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
 # alicetrumpetxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
@@ -69,7 +69,7 @@ ls onions | ./onion-match prefix.txt words.txt --range=5-7
 Match multiple chained segments:
 
 ``` bash
-ls onions | ./onion-match prefix.txt words.txt --range=5-7,3-5 --chain=2 --numbers
+ls onions | ./onion-match prefix.txt words_alpha.txt --range=5-7,3-5 --chain=2 --numbers
 # alicecheeseboyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
 # alicecheese7645xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
 # alicekoalamanxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
@@ -79,13 +79,13 @@ ls onions | ./onion-match prefix.txt words.txt --range=5-7,3-5 --chain=2 --numbe
 Highlight matches in color:
 
 ``` bash
-ls onions | ./onion-match prefix.txt words.txt --color=multi
+ls onions | ./onion-match prefix.txt words_alpha.txt --color=multi
 ```
 
 Insert separators between matched segments (useful when piping into another program):
 
 ``` bash
-ls onions | ./onion-match prefix.txt words.txt --separator
+ls onions | ./onion-match prefix.txt words_alpha.txt --separator
 # alice+lol+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
 # ...
 ```
