@@ -158,6 +158,7 @@ bool parse_size_value(const string& text, size_t& value) {
         }
 
         const size_t digit = static_cast<size_t>(ch - '0');
+        // Detect overflow before multiplying by 10 and adding the next digit.
         if (value > (numeric_limits<size_t>::max() - digit) / 10) {
             return false;
         }
@@ -172,6 +173,8 @@ ParseStatus parse_size_option(const string& text,
                               const string& flag_name,
                               size_t& value,
                               bool require_positive = false) {
+    // Returning kNoMatch instead of kInvalid lets the caller try the next flag
+    // parser without treating this argument as an error.
     if (!starts_with(text, flag_name)) {
         return ParseStatus::kNoMatch;
     }
@@ -190,11 +193,13 @@ bool parse_length_filter(const string& text,
                          size_t& max_len) {
     const size_t dash = text.find('-');
     if (dash == string::npos) {
+        // A single number is shorthand for an exact required length.
         return parse_size_value(text, min_len) &&
                (max_len = min_len, true) &&
                min_len > 0;
     }
 
+    // Reject forms like "3-5-7" early.
     if (text.find('-', dash + 1) != string::npos) {
         return false;
     }
@@ -214,6 +219,8 @@ ParseStatus parse_range_list_argument(const string& text,
 
     size_t start = 0;
     while (start <= text.size()) {
+        // Split manually so we can validate each token and preserve empty
+        // tokens as errors instead of silently skipping them.
         const size_t comma = text.find(',', start);
         const string token = text.substr(start, comma - start);
         LengthRange range;
@@ -336,6 +343,8 @@ bool matches_segment(const string& text,
     if (allow_numbers && is_all_digits(text, start, length)) {
         return true;
     }
+    // Length pruning avoids allocating a substring for lengths that cannot
+    // appear in the dictionary at all.
     if (!binary_search(word_lengths.begin(), word_lengths.end(), length)) {
         return false;
     }
@@ -350,6 +359,12 @@ bool matches_segment(const string& text,
 //
 // The recursion advances one segment at a time from left to right. Memoization
 // is important because multiple prefixes can lead to the same suffix state.
+//
+// Example:
+//   if start == 5 and chain_index == 1, memo[1][5] answers:
+//   "starting at character 5, for the second required segment in the chain,
+//    what segment length should we take next, and how far can the full
+//    remaining chain reach?"
 const SearchState& find_best_chain(
     const string& text,
     size_t start,
@@ -361,6 +376,7 @@ const SearchState& find_best_chain(
     bool allow_numbers,
     bool strict_v3,
     vector<vector<SearchState>>& memo) {
+    // memo[chain_index][start] caches the best answer for this suffix state.
     SearchState& state = memo[chain_index][start];
     if (state.computed) {
         return state;
@@ -368,6 +384,8 @@ const SearchState& find_best_chain(
 
     state.computed = true;
 
+    // If the caller supplied fewer ranges than chain positions, reuse the last
+    // range for the remaining positions.
     const size_t range_index = min(chain_index, ranges.size() - 1);
     const LengthRange& range = ranges[range_index];
     const vector<size_t>& allowed_lengths = range_lengths[range_index];
@@ -480,6 +498,9 @@ bool parse_arguments(int argc, char* argv[], Options& options) {
     options.prefix_file_path = argv[1];
     options.words_file_path = argv[2];
 
+    // Scan remaining arguments left to right. Each parser either consumes the
+    // current flag, rejects it as malformed, or declines so the next parser can
+    // try.
     for (int i = 3; i < argc; ++i) {
         const string arg = argv[i];
 
@@ -571,6 +592,8 @@ vector<string> load_unique_lines(istream& input, bool strict_v3) {
         lines.push_back(move(line));
     }
 
+    // Sorting followed by unique gives deterministic prefix order and removes
+    // duplicates without needing an extra hash set here.
     sort(lines.begin(), lines.end());
     lines.erase(unique(lines.begin(), lines.end()), lines.end());
     return lines;
@@ -589,6 +612,7 @@ Dictionary load_dictionary(istream& input, bool strict_v3) {
             continue;
         }
 
+        // Record the word length only the first time we see the word.
         if (dictionary.words.insert(line).second) {
             dictionary.lengths.push_back(line.size());
         }
@@ -622,6 +646,8 @@ vector<size_t> build_segment_ends(
     vector<size_t> segment_ends;
     segment_ends.reserve(chain_length);
 
+    // Walk forward through the memo table by repeatedly applying the chosen
+    // next segment length at each chain position.
     size_t current_end = prefix_end;
     for (size_t chain_index = 0; chain_index < chain_length; ++chain_index) {
         const SearchState& step = memo[chain_index][current_end];
@@ -663,6 +689,7 @@ MatchResult find_best_match_for_line(
         chain_length, vector<SearchState>(line.size() + 1));
 
     for (const auto& prefix : prefixes) {
+        // Prefixes are only meaningful at the very start of the hostname.
         if (!starts_with(line, prefix)) {
             continue;
         }
@@ -682,6 +709,9 @@ MatchResult find_best_match_for_line(
             continue;
         }
 
+        // The recursive search stores only lengths, so reconstruct the actual
+        // segment boundaries before comparing this match against the current
+        // best prefix match.
         vector<size_t> segment_ends =
             build_segment_ends(prefix.size(), chain_length, memo);
         if (!is_better_match(best_match, prefix.size(), segment_ends)) {
@@ -698,6 +728,15 @@ MatchResult find_best_match_for_line(
 // Produce the exact string that will be printed. When --separator is enabled,
 // this inserts '+' markers between matched pieces and recomputes the segment
 // end positions to match the rendered text rather than the source line.
+//
+// Example:
+//   original: "alicecheeseboyrest"
+//   matched:  prefix "alice", segments "cheese" and "boy"
+//   rendered: "alice+cheese+boy+rest"
+//
+// The matched segment boundaries move to the right because of the inserted '+'
+// characters, so the color-printing code needs rendered indexes, not original
+// indexes.
 RenderedMatch render_match(const string& line,
                            const MatchResult& match,
                            bool use_separator) {
@@ -709,6 +748,8 @@ RenderedMatch render_match(const string& line,
     rendered.line.clear();
     rendered.line.append(line, 0, match.prefix_end);
 
+    // Rebuild the output as:
+    //   prefix + '+' + segment1 + '+' + segment2 + ... + '+' + suffix
     size_t segment_start = match.prefix_end;
     for (size_t segment_end : match.segment_ends) {
         rendered.line.push_back('+');
@@ -742,6 +783,7 @@ void print_multi_color_match(const RenderedMatch& rendered, bool use_separator) 
 
     size_t segment_start = rendered.prefix_end;
     if (use_separator) {
+        // Separators stay plain so they visually separate the colored pieces.
         cout << '+';
         ++segment_start;
     }
@@ -779,6 +821,8 @@ void print_single_color_match(const RenderedMatch& rendered, bool use_separator)
          << rendered.line.substr(0, rendered.prefix_end)
          << kColorEnd;
 
+    // In separator mode, each '+' lives between colored spans, so we print the
+    // separator explicitly and color only the matched text around it.
     size_t segment_start = rendered.prefix_end + 1;
     for (size_t segment_end : rendered.segment_ends) {
         cout << '+'
@@ -878,6 +922,7 @@ int main(int argc, char* argv[]) {
             dictionary.words,
             options.allow_numbers,
             options.strict_v3);
+        // min_total_length is measured against the original, unrendered match.
         if (!match.matched() || match.matched_end() < options.min_total_length) {
             continue;
         }
