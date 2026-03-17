@@ -1,5 +1,5 @@
 CXX := g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -O2 -s
+CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -O3 -s
 TARGET := onion-match
 SRC := onion-match.cpp
 
