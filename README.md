@@ -82,6 +82,9 @@ Highlight matches in color:
 ls onions | ./onion-match prefix.txt words_alpha.txt --color=multi
 ```
 
+Color output is automatically disabled when stdout is not a terminal, even for
+`--color=yes` and `--color=multi`.
+
 Insert separators between matched segments (useful when piping into another program):
 
 ``` bash

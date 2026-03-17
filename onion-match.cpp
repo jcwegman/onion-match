@@ -65,7 +65,6 @@ enum class ParseStatus {
 
 // Output coloring modes supported by --color=...
 enum class ColorMode {
-    kAuto,
     kYes,
     kNo,
     kMulti,
@@ -125,7 +124,7 @@ struct Options {
     vector<LengthRange> ranges{LengthRange{3, kUnlimitedLength}};
     size_t chain_length = 1;
     size_t min_total_length = 0;
-    ColorMode color_mode = ColorMode::kAuto;
+    ColorMode color_mode = ColorMode::kMulti;
     bool use_separator = false;
     bool allow_numbers = false;
     bool strict_v3 = false;
@@ -248,7 +247,7 @@ ParseStatus parse_range_list_option(const string& text,
     return parse_range_list_argument(text.substr(flag_name.size()), ranges);
 }
 
-// Parse --color=auto|yes|no|multi.
+// Parse --color=yes|no|multi.
 ParseStatus parse_color_mode(const string& text, ColorMode& mode) {
     constexpr const char* kFlag = "--color=";
     if (!starts_with(text, kFlag)) {
@@ -256,10 +255,6 @@ ParseStatus parse_color_mode(const string& text, ColorMode& mode) {
     }
 
     const string value = text.substr(8);
-    if (value == "auto") {
-        mode = ColorMode::kAuto;
-        return ParseStatus::kSuccess;
-    }
     if (value == "yes") {
         mode = ColorMode::kYes;
         return ParseStatus::kSuccess;
@@ -470,11 +465,11 @@ void print_usage(const char* program_name) {
          << "      addresses: a-z and 2-7\n"
          << "  --separator\n"
          << "      Insert '+' between matched segments, including after the last one\n"
-         << "  --color=auto|yes|no|multi\n"
-         << "      auto: single-color highlight on terminals only\n"
-         << "      yes: always highlight the full matched prefix+segment span in red\n"
+         << "  --color=yes|no|multi\n"
+         << "      yes: highlight the full matched prefix+segment span on terminals only\n"
          << "      no: plain output with no color\n"
-         << "      multi: color prefix and each segment separately\n"
+         << "      multi: color prefix and each segment separately on terminals only\n"
+         << "      Default: multi\n"
          << "  --help\n"
          << "      Show this help message\n\n"
          << "Example:\n"
@@ -901,11 +896,15 @@ int main(int argc, char* argv[]) {
         build_range_lengths(options.ranges, dictionary.lengths);
 
     // Step 5: decide whether output should contain ANSI colors.
+    // "yes" and "multi" both degrade to plain output automatically when stdout
+    // is not a terminal, which keeps pipes and redirected output free of ANSI
+    // escape sequences.
     const bool stdout_is_terminal = isatty(STDOUT_FILENO);
-    const bool use_color = options.color_mode == ColorMode::kYes ||
-                           options.color_mode == ColorMode::kMulti ||
-                           (options.color_mode == ColorMode::kAuto && stdout_is_terminal);
-    const bool use_multi_color = options.color_mode == ColorMode::kMulti;
+    const bool use_color = stdout_is_terminal &&
+                           (options.color_mode == ColorMode::kYes ||
+                            options.color_mode == ColorMode::kMulti);
+    const bool use_multi_color =
+        use_color && options.color_mode == ColorMode::kMulti;
 
     // Step 6: stream candidate lines from stdin, keep only matches, and print
     // them in the requested format.
