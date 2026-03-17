@@ -11,6 +11,20 @@
 
 namespace {
 
+// This program filters candidate .onion hostnames. It combines:
+// - prefixes loaded from one file,
+// - dictionary words loaded from another file,
+// - candidate hostnames streamed on stdin.
+//
+// For each candidate line, we try to match:
+//   prefix + exactly N valid segments
+//
+// The helpers in this file are organized top-down:
+// parsing utilities, matching utilities, rendering utilities, and finally
+// main() to orchestrate the end-to-end workflow.
+
+// Use a small set of selective std imports instead of "using namespace std;" so
+// common types stay readable without losing all qualification context.
 using std::binary_search;
 using std::cerr;
 using std::cin;
@@ -29,6 +43,7 @@ using std::unique;
 using std::unordered_set;
 using std::vector;
 
+// Shared constants for "unbounded" lengths and ANSI color output.
 constexpr size_t kUnlimitedLength = numeric_limits<size_t>::max();
 constexpr const char* kPrefixColor = "\033[1;31m";
 constexpr const char* kSuffixColors[] = {
@@ -40,12 +55,15 @@ constexpr const char* kSuffixColors[] = {
 constexpr const char* kSingleColor = "\033[1;31m";
 constexpr const char* kColorEnd = "\033[0m";
 
+// Parsing helpers distinguish "this flag does not apply" from "this flag
+// applies but contains an invalid value" so argv can be scanned once.
 enum class ParseStatus {
     kNoMatch,
     kSuccess,
     kInvalid,
 };
 
+// Output coloring modes supported by --color=...
 enum class ColorMode {
     kAuto,
     kYes,
@@ -53,11 +71,16 @@ enum class ColorMode {
     kMulti,
 };
 
+// One allowed segment-length window. When the chain is longer than the number
+// of configured ranges, the final range is reused for the remaining segments.
 struct LengthRange {
     size_t min_len = 1;
     size_t max_len = kUnlimitedLength;
 };
 
+// Memoized answer for one recursive search state.
+// next_length stores the chosen segment length at this step, and final_end
+// stores how far the chosen full chain reaches in the line.
 struct SearchState {
     bool computed = false;
     bool matched = false;
@@ -65,6 +88,7 @@ struct SearchState {
     size_t final_end = 0;
 };
 
+// Best match chosen for a candidate line.
 struct MatchResult {
     size_t prefix_end = 0;
     vector<size_t> segment_ends;
@@ -78,6 +102,8 @@ struct MatchResult {
     }
 };
 
+// Match coordinates rewritten for the rendered output string. This matters when
+// --separator inserts '+' characters and shifts later character positions.
 struct RenderedMatch {
     string line;
     size_t prefix_end = 0;
@@ -85,11 +111,14 @@ struct RenderedMatch {
     vector<size_t> segment_ends;
 };
 
+// Dictionary words plus their distinct lengths, which act as a quick prefilter
+// before substring hash lookups.
 struct Dictionary {
     unordered_set<string> words;
     vector<size_t> lengths;
 };
 
+// Parsed command-line options.
 struct Options {
     string prefix_file_path;
     string words_file_path;
@@ -102,6 +131,7 @@ struct Options {
     bool strict_v3 = false;
 };
 
+// Normalize input to handle both LF and CRLF line endings.
 string trim_line_endings(string line) {
     while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
         line.pop_back();
@@ -109,11 +139,13 @@ string trim_line_endings(string line) {
     return line;
 }
 
+// Simple helper used in both option parsing and prefix matching.
 bool starts_with(const string& text, const string& prefix) {
     return text.size() >= prefix.size() &&
            text.compare(0, prefix.size(), prefix) == 0;
 }
 
+// Parse a non-negative decimal integer into size_t while rejecting overflow.
 bool parse_size_value(const string& text, size_t& value) {
     if (text.empty()) {
         return false;
@@ -135,6 +167,7 @@ bool parse_size_value(const string& text, size_t& value) {
     return true;
 }
 
+// Parse options shaped like "--flag=123".
 ParseStatus parse_size_option(const string& text,
                               const string& flag_name,
                               size_t& value,
@@ -151,6 +184,7 @@ ParseStatus parse_size_option(const string& text,
     return ParseStatus::kSuccess;
 }
 
+// Parse either "5" or "3-7" into a length interval.
 bool parse_length_filter(const string& text,
                          size_t& min_len,
                          size_t& max_len) {
@@ -173,6 +207,7 @@ bool parse_length_filter(const string& text,
            min_len <= max_len;
 }
 
+// Parse a comma-separated list of ranges used by --range=R1,R2,...
 ParseStatus parse_range_list_argument(const string& text,
                                       vector<LengthRange>& ranges) {
     ranges.clear();
@@ -196,6 +231,7 @@ ParseStatus parse_range_list_argument(const string& text,
     return ranges.empty() ? ParseStatus::kInvalid : ParseStatus::kSuccess;
 }
 
+// Convenience wrapper that only parses when the flag prefix matches.
 ParseStatus parse_range_list_option(const string& text,
                                     const string& flag_name,
                                     vector<LengthRange>& ranges) {
@@ -205,6 +241,7 @@ ParseStatus parse_range_list_option(const string& text,
     return parse_range_list_argument(text.substr(flag_name.size()), ranges);
 }
 
+// Parse --color=auto|yes|no|multi.
 ParseStatus parse_color_mode(const string& text, ColorMode& mode) {
     constexpr const char* kFlag = "--color=";
     if (!starts_with(text, kFlag)) {
@@ -232,6 +269,7 @@ ParseStatus parse_color_mode(const string& text, ColorMode& mode) {
     return ParseStatus::kInvalid;
 }
 
+// Optional numeric segments must contain digits only.
 bool is_all_digits(const string& text,
                    size_t start,
                    size_t length) {
@@ -243,10 +281,12 @@ bool is_all_digits(const string& text,
     return true;
 }
 
+// v3 onion hostnames permit lowercase letters plus digits 2-7.
 bool is_v3_char(char ch) {
     return (ch >= 'a' && ch <= 'z') || (ch >= '2' && ch <= '7');
 }
 
+// Check whether a substring stays within the v3 character alphabet.
 bool is_v3_compatible(const string& text,
                       size_t start,
                       size_t length) {
@@ -258,10 +298,13 @@ bool is_v3_compatible(const string& text,
     return true;
 }
 
+// Whole-string overload for the helper above.
 bool is_v3_compatible(const string& text) {
     return is_v3_compatible(text, 0, text.size());
 }
 
+// Keep only dictionary lengths that are usable for a given range. This avoids
+// wasted substring/hash work for segment lengths that can never match.
 vector<size_t> filter_lengths(const vector<size_t>& lengths,
                               size_t min_len,
                               size_t max_len) {
@@ -274,6 +317,12 @@ vector<size_t> filter_lengths(const vector<size_t>& lengths,
     return filtered;
 }
 
+// Decide whether text[start, start + length) can be used as one segment.
+//
+// A segment is valid when:
+// - it stays inside the v3 alphabet if strict mode is enabled, and
+// - it is either all digits (when --numbers is enabled) or an exact dictionary
+//   word of an allowed length.
 bool matches_segment(const string& text,
                      size_t start,
                      size_t length,
@@ -293,6 +342,14 @@ bool matches_segment(const string& text,
     return words.find(text.substr(start, length)) != words.end();
 }
 
+// Recursive, memoized search for the best segment chain from one position.
+//
+// "Best" means:
+// - consume as much of the input line as possible
+// - if tied, prefer the longer current segment
+//
+// The recursion advances one segment at a time from left to right. Memoization
+// is important because multiple prefixes can lead to the same suffix state.
 const SearchState& find_best_chain(
     const string& text,
     size_t start,
@@ -320,6 +377,8 @@ const SearchState& find_best_chain(
         return state;
     }
 
+    // Try longer segments first so a successful chain naturally prefers them.
+    // The explicit break at the minimum avoids unsigned underflow on size_t.
     for (size_t len = limit; len >= range.min_len; --len) {
         if (!matches_segment(
                 text, start, len, words, allowed_lengths, allow_numbers, strict_v3)) {
@@ -331,6 +390,7 @@ const SearchState& find_best_chain(
 
         size_t final_end = start + len;
         if (chain_index + 1 < chain_length) {
+            // Only recurse when more required segments remain.
             const SearchState& child = find_best_chain(
                 text,
                 start + len,
@@ -351,6 +411,8 @@ const SearchState& find_best_chain(
             final_end = child.final_end;
         }
 
+        // Retain whichever chain reaches farthest to the right, breaking ties
+        // in favor of the longer immediate segment.
         if (!state.matched || final_end > state.final_end ||
             (final_end == state.final_end && len > state.next_length)) {
             state.matched = true;
@@ -402,6 +464,8 @@ void print_usage(const char* program_name) {
          << " prefix.txt words_alpha.txt --range=5-7,3-5 --chain=2 --separator\n";
 }
 
+// Parse command-line arguments into the Options struct. The parser is designed
+// to stay strict: anything unknown or malformed is reported immediately.
 bool parse_arguments(int argc, char* argv[], Options& options) {
     if (argc == 2 && string(argv[1]) == "--help") {
         print_usage(argv[0]);
@@ -493,6 +557,9 @@ bool parse_arguments(int argc, char* argv[], Options& options) {
     return true;
 }
 
+// Load a list of non-empty lines, optionally filtering out values that are
+// incompatible with v3 onion characters. Returned lines are sorted and deduped
+// so the downstream matching code can assume a clean input set.
 vector<string> load_unique_lines(istream& input, bool strict_v3) {
     vector<string> lines;
     string line;
@@ -509,6 +576,8 @@ vector<string> load_unique_lines(istream& input, bool strict_v3) {
     return lines;
 }
 
+// Load the dictionary into a hash set for fast exact lookup and separately keep
+// a deduplicated list of word lengths for cheap pre-filtering.
 Dictionary load_dictionary(istream& input, bool strict_v3) {
     Dictionary dictionary;
     dictionary.words.reserve(400000);
@@ -532,6 +601,7 @@ Dictionary load_dictionary(istream& input, bool strict_v3) {
     return dictionary;
 }
 
+// Build the allowed dictionary lengths for each configured segment range.
 vector<vector<size_t>> build_range_lengths(
     const vector<LengthRange>& ranges,
     const vector<size_t>& word_lengths) {
@@ -543,6 +613,8 @@ vector<vector<size_t>> build_range_lengths(
     return range_lengths;
 }
 
+// Reconstruct the chosen segment boundaries from the memo table produced by
+// find_best_chain().
 vector<size_t> build_segment_ends(
     size_t prefix_end,
     size_t chain_length,
@@ -560,6 +632,8 @@ vector<size_t> build_segment_ends(
     return segment_ends;
 }
 
+// Choose between two candidate line matches using the same ranking policy as
+// the recursive search: farther right wins, then longer prefix wins.
 bool is_better_match(const MatchResult& current,
                      size_t candidate_prefix_end,
                      const vector<size_t>& candidate_segment_ends) {
@@ -572,6 +646,9 @@ bool is_better_match(const MatchResult& current,
     return candidate_prefix_end > current.prefix_end;
 }
 
+// Check every prefix against one input line and keep only the best resulting
+// match. A single memo table is reused because the search state depends only on
+// position and chain index, not on which prefix led us there.
 MatchResult find_best_match_for_line(
     const string& line,
     const vector<string>& prefixes,
@@ -618,6 +695,9 @@ MatchResult find_best_match_for_line(
     return best_match;
 }
 
+// Produce the exact string that will be printed. When --separator is enabled,
+// this inserts '+' markers between matched pieces and recomputes the segment
+// end positions to match the rendered text rather than the source line.
 RenderedMatch render_match(const string& line,
                            const MatchResult& match,
                            bool use_separator) {
@@ -638,6 +718,8 @@ RenderedMatch render_match(const string& line,
     rendered.line.push_back('+');
     rendered.line.append(line, match.matched_end(), string::npos);
 
+    // Translate segment boundaries from the original line into positions in the
+    // separator-augmented output string.
     rendered.segment_ends.clear();
     size_t rendered_end = match.prefix_end;
     for (size_t i = 0; i < match.segment_ends.size(); ++i) {
@@ -651,6 +733,8 @@ RenderedMatch render_match(const string& line,
     return rendered;
 }
 
+// Multi-color mode colors the prefix and each segment independently while
+// leaving the optional '+' separators uncolored.
 void print_multi_color_match(const RenderedMatch& rendered, bool use_separator) {
     cout << kPrefixColor
          << rendered.line.substr(0, rendered.prefix_end)
@@ -679,6 +763,8 @@ void print_multi_color_match(const RenderedMatch& rendered, bool use_separator) 
     cout << rendered.line.substr(segment_start) << '\n';
 }
 
+// Single-color mode highlights the matched pieces using one color. When
+// separators are enabled, the '+' characters themselves remain uncolored.
 void print_single_color_match(const RenderedMatch& rendered, bool use_separator) {
     if (!use_separator) {
         cout << kSingleColor
@@ -705,6 +791,7 @@ void print_single_color_match(const RenderedMatch& rendered, bool use_separator)
     cout << '+' << rendered.line.substr(rendered.matched_end) << '\n';
 }
 
+// Central output helper shared by main().
 void print_match(const string& line,
                  const MatchResult& match,
                  bool use_separator,
@@ -727,11 +814,13 @@ void print_match(const string& line,
 }  // namespace
 
 int main(int argc, char* argv[]) {
+    // Step 1: parse CLI options.
     Options options;
     if (!parse_arguments(argc, argv, options)) {
         return 1;
     }
 
+    // Step 2: open the prefix and dictionary files.
     ifstream prefix_file(options.prefix_file_path);
     if (!prefix_file) {
         cerr << "Failed to open prefix file: " << options.prefix_file_path << '\n';
@@ -744,6 +833,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Step 3: sanity-check configured ranges.
     for (const auto& range : options.ranges) {
         if (range.min_len == 0 || range.min_len > range.max_len) {
             cerr << "Invalid range configuration\n";
@@ -751,6 +841,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Step 4: load prefixes and dictionary data.
     const vector<string> prefixes =
         load_unique_lines(prefix_file, options.strict_v3);
     if (prefixes.empty()) {
@@ -765,12 +856,15 @@ int main(int argc, char* argv[]) {
     const vector<vector<size_t>> range_lengths =
         build_range_lengths(options.ranges, dictionary.lengths);
 
+    // Step 5: decide whether output should contain ANSI colors.
     const bool stdout_is_terminal = isatty(STDOUT_FILENO);
     const bool use_color = options.color_mode == ColorMode::kYes ||
                            options.color_mode == ColorMode::kMulti ||
                            (options.color_mode == ColorMode::kAuto && stdout_is_terminal);
     const bool use_multi_color = options.color_mode == ColorMode::kMulti;
 
+    // Step 6: stream candidate lines from stdin, keep only matches, and print
+    // them in the requested format.
     string line;
     while (getline(cin, line)) {
         line = trim_line_endings(move(line));
